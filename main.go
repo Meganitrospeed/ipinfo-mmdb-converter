@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
@@ -58,7 +59,18 @@ func main() {
 		log.Fatalf("create ASN tree: %v", err)
 	}
 
+	fmt.Println("Counting source networks...")
+	total, err := countNetworks(db)
+	if err != nil {
+		log.Fatalf("count source networks: %v", err)
+	}
+	if total == 0 {
+		log.Fatal("source database contains no networks")
+	}
+	fmt.Printf("Found %d networks. Converting...\n", total)
+
 	var networks, cityRecords, asnRecords uint64
+	progress := newProgressBar(total)
 	iterator := db.Networks(maxminddb.SkipAliasedNetworks)
 	for iterator.Next() {
 		networks++
@@ -112,18 +124,71 @@ func main() {
 			}
 			asnRecords++
 		}
+		progress.update(networks)
 	}
 	if err := iterator.Err(); err != nil {
 		log.Fatalf("iterate source: %v", err)
 	}
 
+	progress.finish()
+	fmt.Printf("Writing %s...\n", *cityOutput)
 	if err := writeTree(*cityOutput, city); err != nil {
 		log.Fatal(err)
 	}
+	fmt.Printf("Writing %s...\n", *asnOutput)
 	if err := writeTree(*asnOutput, asn); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("converted %d networks: %d city records, %d ASN records\n", networks, cityRecords, asnRecords)
+}
+
+func countNetworks(db *maxminddb.Reader) (uint64, error) {
+	iterator := db.Networks(maxminddb.SkipAliasedNetworks)
+	var count uint64
+	for iterator.Next() {
+		var record ipinfoRecord
+		if _, err := iterator.Network(&record); err != nil {
+			return 0, err
+		}
+		count++
+	}
+	return count, iterator.Err()
+}
+
+type progressBar struct {
+	total       uint64
+	lastPercent int
+	started     time.Time
+}
+
+func newProgressBar(total uint64) *progressBar {
+	bar := &progressBar{total: total, lastPercent: -1, started: time.Now()}
+	bar.update(0)
+	return bar
+}
+
+func (bar *progressBar) update(current uint64) {
+	percent := int(current * 100 / bar.total)
+	if percent == bar.lastPercent && current != bar.total {
+		return
+	}
+	bar.lastPercent = percent
+	const width = 40
+	filled := percent * width / 100
+	rate := float64(current) / time.Since(bar.started).Seconds()
+	fmt.Printf("\r[%s%s] %3d%%  %d/%d  %.0f networks/s",
+		strings.Repeat("#", filled),
+		strings.Repeat("-", width-filled),
+		percent,
+		current,
+		bar.total,
+		rate,
+	)
+}
+
+func (bar *progressBar) finish() {
+	bar.update(bar.total)
+	fmt.Println()
 }
 
 func writeTree(path string, tree *mmdbwriter.Tree) error {
